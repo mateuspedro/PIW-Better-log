@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PIW — Botão Log de Capturas na sidebar
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
-// @description  Adiciona o botão 📜 na sidebar do PIW-QOL que abre o Log de Capturas com filtros, ordenação, ícones e botão de limpar histórico.
+// @version      1.2.0
+// @description  Adiciona o botão 📜 na sidebar do PIW-QOL que abre o Log de Capturas com filtros, ordenação, ícones e botão de limpar histórico. Auto-refresh a cada 40s quando a aba está visível.
 // @author       KizaniN
 // @match        https://poke.idleworld.online/play*
 // @grant        none
@@ -17,6 +17,7 @@
     'use strict';
 
     const CAPTURE_LOG_PAGE_SIZE = 50;
+    const AUTO_REFRESH_MS = 40000;
 
     function getPokemonQualityInfo(multiplier) {
         const value = Number(multiplier);
@@ -128,8 +129,19 @@
         return POKEMON_ITEM_ICONS[id] ? `/assets/pokeitems/${POKEMON_ITEM_ICONS[id]}.png` : '';
     }
 
+    let activeCaptureLogRefreshTimer = null;
+
+    function stopCaptureLogAutoRefresh() {
+        if (activeCaptureLogRefreshTimer !== null) {
+            clearInterval(activeCaptureLogRefreshTimer);
+            activeCaptureLogRefreshTimer = null;
+        }
+    }
+
     function showCustomCaptureLog() {
         document.querySelector('.script-capture-log-backdrop')?.remove();
+        stopCaptureLogAutoRefresh();
+
         const state = {
             tab: 'all', sort: 'recent', search: '',
             ivMin: '', ivMax: '', qualityMin: '', qualityMax: '',
@@ -196,8 +208,10 @@
         const sortEl = backdrop.querySelector('.script-cl-sort');
 
         const close = () => {
+            stopCaptureLogAutoRefresh();
             document.removeEventListener('pointermove', onPointerMove);
             document.removeEventListener('pointerup', onPointerUp);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
             backdrop.remove();
         };
         backdrop.querySelector('.script-capture-log-close').addEventListener('click', close);
@@ -306,22 +320,26 @@
             loadMoreBtn.style.display = visible.length < filtered.length ? '' : 'none';
             loadMoreBtn.textContent = `Carregar mais (+${Math.min(CAPTURE_LOG_PAGE_SIZE, filtered.length - visible.length)})`;
         };
-        const load = async () => {
+        const load = async ({ silent = false } = {}) => {
             if (state.loading) return;
             state.loading = true;
-            statusEl.style.color = '#a0aec0';
-            statusEl.textContent = 'Carregando…';
+            if (!silent) {
+                statusEl.style.color = '#a0aec0';
+                statusEl.textContent = 'Carregando…';
+            }
             try {
                 const payload = await gameApiRequest('/api/game/capture-log?filter=all');
                 state.allRows = Array.isArray(payload?.rows) ? payload.rows : [];
                 state.page = 1;
                 render();
             } catch (error) {
-                statusEl.textContent = `Não foi possível carregar o log: ${error.message}`;
-                statusEl.style.color = '#feb2b2';
+                if (!silent) {
+                    statusEl.textContent = `Não foi possível carregar o log: ${error.message}`;
+                    statusEl.style.color = '#feb2b2';
+                }
             } finally { state.loading = false; }
         };
-        backdrop.querySelector('.script-capture-log-refresh').addEventListener('click', load);
+        backdrop.querySelector('.script-capture-log-refresh').addEventListener('click', () => load());
         backdrop.querySelectorAll('.script-cl-tab').forEach(tab => {
             tab.addEventListener('click', () => {
                 state.tab = tab.dataset.tab;
@@ -336,6 +354,29 @@
         bindInput(ivMaxEl, 'ivMax');
         sortEl.addEventListener('change', () => { state.sort = sortEl.value; state.page = 1; render(); });
         loadMoreBtn.addEventListener('click', () => { state.page += 1; render(); });
+
+        // ===== Auto-refresh a cada 40s (só com a aba visível) =====
+        function startAutoRefresh() {
+            stopCaptureLogAutoRefresh();
+            activeCaptureLogRefreshTimer = setInterval(() => {
+                if (document.hidden) return;
+                if (!document.body.contains(backdrop)) {
+                    stopCaptureLogAutoRefresh();
+                    return;
+                }
+                load({ silent: true });
+            }, AUTO_REFRESH_MS);
+        }
+        function onVisibilityChange() {
+            if (document.hidden) {
+                stopCaptureLogAutoRefresh();
+            } else if (document.body.contains(backdrop)) {
+                startAutoRefresh();
+                load({ silent: true });
+            }
+        }
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        startAutoRefresh();
 
         // ===== Limpar histórico =====
         backdrop.querySelector('.script-cl-clear').addEventListener('click', async () => {
