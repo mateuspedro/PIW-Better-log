@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PIW — Botão Log de Capturas na sidebar
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
-// @description  Adiciona o botão 📜 na sidebar do PIW-QOL que abre o Log de Capturas com filtros, ordenação, ícones e botão de limpar histórico. Auto-refresh a cada 40s quando a aba está visível.
+// @version      1.3.0
+// @description  Adiciona o botão 📜 na sidebar do PIW-QOL que abre o Log de Capturas com filtros, ordenação, ícones e botão de limpar histórico. Auto-refresh a cada 40s quando a aba está visível. Exibe todos os resultados sem paginação.
 // @author       KizaniN
 // @match        https://poke.idleworld.online/play*
 // @grant        none
@@ -16,7 +16,6 @@
 (function() {
     'use strict';
 
-    const CAPTURE_LOG_PAGE_SIZE = 50;
     const AUTO_REFRESH_MS = 40000;
 
     function getPokemonQualityInfo(multiplier) {
@@ -144,9 +143,8 @@
 
         const state = {
             tab: 'all', sort: 'recent', search: '',
-            ivMin: '', ivMax: '', qualityMin: '', qualityMax: '',
-            levelMin: '', levelMax: '', shinyOnly: false,
-            page: 1, total: 0, allRows: [], loading: false
+            ivMin: '', ivMax: '',
+            allRows: [], loading: false
         };
         const STORAGE_POS = 'script_capture_log_pos_v1';
         let savedPos = null;
@@ -189,7 +187,6 @@
                     <div class="script-cl-status" style="color:#a0aec0;font-size:11px;padding:0 2px;">Carregando…</div>
                     <div class="script-cl-list" style="flex:1;overflow:auto;display:grid;gap:5px;padding:1px;min-height:0;"></div>
                     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding-top:4px;border-top:1px solid #1a2d3a;">
-                        <button class="script-cl-load-more mk-bulk-btn" type="button" style="display:none;font-size:11px;padding:3px 8px;">Carregar mais</button>
                         <button class="script-cl-clear mk-bulk-btn" type="button" style="margin-left:auto;font-size:11px;padding:3px 10px;color:#feb2b2;border-color:#71313c;">🗑 Limpar histórico</button>
                     </div>
                 </div>
@@ -201,7 +198,6 @@
         const listEl = backdrop.querySelector('.script-cl-list');
         const statusEl = backdrop.querySelector('.script-cl-status');
         const totalsEl = backdrop.querySelector('.script-capture-log-totals');
-        const loadMoreBtn = backdrop.querySelector('.script-cl-load-more');
         const searchEl = backdrop.querySelector('.script-cl-search');
         const ivMinEl = backdrop.querySelector('.script-cl-iv-min');
         const ivMaxEl = backdrop.querySelector('.script-cl-iv-max');
@@ -269,18 +265,22 @@
             if (state.ivMax !== '' && iv > Number(state.ivMax)) return false;
             return true;
         });
-        const sortRows = rows => {
-            const sorted = [...rows];
+               const compareByMode = (a, b) => {
             switch (state.sort) {
-                case 'recent': sorted.sort((a, b) => new Date(b.at) - new Date(a.at)); break;
-                case 'oldest': sorted.sort((a, b) => new Date(a.at) - new Date(b.at)); break;
-                case 'quality-desc': sorted.sort((a, b) => Number(b.quality || 0) - Number(a.quality || 0)); break;
-                case 'quality-asc': sorted.sort((a, b) => Number(a.quality || 0) - Number(b.quality || 0)); break;
-                case 'iv-desc': sorted.sort((a, b) => Number(b.ivTotal || 0) - Number(a.ivTotal || 0)); break;
-                case 'iv-asc': sorted.sort((a, b) => Number(a.ivTotal || 0) - Number(b.ivTotal || 0)); break;
-                case 'name': sorted.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR')); break;
+                case 'recent': return new Date(b.at) - new Date(a.at);
+                case 'oldest': return new Date(a.at) - new Date(b.at);
+                case 'quality-desc': return Number(b.quality || 0) - Number(a.quality || 0);
+                case 'quality-asc': return Number(a.quality || 0) - Number(b.quality || 0);
+                case 'iv-desc': return Number(b.ivTotal || 0) - Number(a.ivTotal || 0);
+                case 'iv-asc': return Number(a.ivTotal || 0) - Number(b.ivTotal || 0);
+                case 'name': return String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR');
+                default: return 0;
             }
-            return sorted;
+        };
+        const sortRows = rows => {
+            const shinies = rows.filter(r => r.shiny).sort(compareByMode);
+            const normals = rows.filter(r => !r.shiny).sort(compareByMode);
+            return [...shinies, ...normals];
         };
         const buildRow = r => {
             const qualityInfo = getPokemonQualityInfo(Number(r.quality));
@@ -308,17 +308,14 @@
         };
         const render = () => {
             const filtered = sortRows(applyLocalFilters(state.allRows));
-            const visible = filtered.slice(0, state.page * CAPTURE_LOG_PAGE_SIZE);
             totalsEl.textContent = `${fmtNum(filtered.length)} de ${fmtNum(state.allRows.length)}`;
-            statusEl.textContent = state.allRows.length === 0 ? 'Nenhuma captura registrada.' : `${fmtNum(visible.length)} de ${fmtNum(filtered.length)} exibida(s).`;
+            statusEl.textContent = state.allRows.length === 0 ? 'Nenhuma captura registrada.' : `${fmtNum(filtered.length)} exibida(s).`;
             listEl.innerHTML = '';
-            if (visible.length === 0) {
+            if (filtered.length === 0) {
                 listEl.innerHTML = '<div style="color:#718096;text-align:center;padding:18px;">Nenhuma captura corresponde aos filtros.</div>';
             } else {
-                visible.forEach(r => listEl.appendChild(buildRow(r)));
+                filtered.forEach(r => listEl.appendChild(buildRow(r)));
             }
-            loadMoreBtn.style.display = visible.length < filtered.length ? '' : 'none';
-            loadMoreBtn.textContent = `Carregar mais (+${Math.min(CAPTURE_LOG_PAGE_SIZE, filtered.length - visible.length)})`;
         };
         const load = async ({ silent = false } = {}) => {
             if (state.loading) return;
@@ -330,7 +327,6 @@
             try {
                 const payload = await gameApiRequest('/api/game/capture-log?filter=all');
                 state.allRows = Array.isArray(payload?.rows) ? payload.rows : [];
-                state.page = 1;
                 render();
             } catch (error) {
                 if (!silent) {
@@ -344,16 +340,14 @@
             tab.addEventListener('click', () => {
                 state.tab = tab.dataset.tab;
                 backdrop.querySelectorAll('.script-cl-tab').forEach(t => t.classList.toggle('on', t === tab));
-                state.page = 1;
                 render();
             });
         });
-        const bindInput = (el, key) => el.addEventListener('input', () => { state[key] = el.value; state.page = 1; render(); });
+        const bindInput = (el, key) => el.addEventListener('input', () => { state[key] = el.value; render(); });
         bindInput(searchEl, 'search');
         bindInput(ivMinEl, 'ivMin');
         bindInput(ivMaxEl, 'ivMax');
-        sortEl.addEventListener('change', () => { state.sort = sortEl.value; state.page = 1; render(); });
-        loadMoreBtn.addEventListener('click', () => { state.page += 1; render(); });
+        sortEl.addEventListener('change', () => { state.sort = sortEl.value; render(); });
 
         // ===== Auto-refresh a cada 40s (só com a aba visível) =====
         function startAutoRefresh() {
@@ -407,7 +401,6 @@
             try {
                 await gameApiRequest('/api/game/capture-log/clear', { method: 'POST' });
                 state.allRows = [];
-                state.page = 1;
                 statusEl.style.color = '#48bb78';
                 statusEl.textContent = 'Histórico apagado.';
                 render();
