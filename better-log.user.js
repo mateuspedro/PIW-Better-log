@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PIW — Botão Log de Capturas na sidebar
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      1.4.0
 // @description  Adiciona o botão 📜 na sidebar do PIW-QOL que abre o Log de Capturas com filtros, ordenação, ícones e botão de limpar histórico. Auto-refresh a cada 40s quando a aba está visível. Exibe todos os resultados sem paginação.
 // @author       KizaniN
 // @match        https://poke.idleworld.online/play*
