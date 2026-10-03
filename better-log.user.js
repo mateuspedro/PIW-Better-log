@@ -18,6 +18,52 @@
 
     const AUTO_REFRESH_MS = 40000;
 
+    // ===== Interceptação do WebSocket para detectar capturas em tempo real =====
+    const NativeWebSocket = window.WebSocket;
+    const nativeWebSocketSend = NativeWebSocket.prototype.send;
+    let gameSocket = null;
+    const trackedGameSockets = new WeakSet();
+    const captureLogRefreshCallbacks = new Set();
+
+    function notifyCaptureLogRefresh() {
+        captureLogRefreshCallbacks.forEach(cb => {
+            try { cb(); } catch (e) { console.warn('[PIW-Better-log] refresh callback falhou:', e); }
+        });
+    }
+
+    function trackGameSocket(socket, url = socket?.url) {
+        if (!socket || !String(url || '').includes('/ws')) return socket;
+        if (!gameSocket || gameSocket.readyState !== NativeWebSocket.OPEN) gameSocket = socket;
+        if (trackedGameSockets.has(socket)) return socket;
+        trackedGameSockets.add(socket);
+        socket.addEventListener('message', event => {
+            let message;
+            try { message = JSON.parse(event.data); } catch { return; }
+            if (message?.type === 'catch-result' && message.success === true) {
+                notifyCaptureLogRefresh();
+            }
+        });
+        socket.addEventListener('close', () => {
+            if (gameSocket === socket) gameSocket = null;
+        });
+        return socket;
+    }
+
+    function TrackedWebSocket(url, protocols) {
+        const socket = protocols === undefined
+            ? new NativeWebSocket(url)
+            : new NativeWebSocket(url, protocols);
+        return trackGameSocket(socket, url);
+    }
+    TrackedWebSocket.prototype = NativeWebSocket.prototype;
+    Object.setPrototypeOf(TrackedWebSocket, NativeWebSocket);
+    window.WebSocket = TrackedWebSocket;
+
+    NativeWebSocket.prototype.send = function(data) {
+        trackGameSocket(this);
+        return nativeWebSocketSend.call(this, data);
+    };
+
     function getPokemonQualityInfo(multiplier) {
         const value = Number(multiplier);
         if (!Number.isFinite(value)) return null;
@@ -205,6 +251,7 @@
 
         const close = () => {
             stopCaptureLogAutoRefresh();
+            captureLogRefreshCallbacks.delete(onCaptureDetected);
             document.removeEventListener('pointermove', onPointerMove);
             document.removeEventListener('pointerup', onPointerUp);
             document.removeEventListener('visibilitychange', onVisibilityChange);
@@ -282,12 +329,15 @@
             const normals = rows.filter(r => !r.shiny).sort(compareByMode);
             return [...shinies, ...normals];
         };
-        const buildRow = r => {
+                const buildRow = r => {
             const qualityInfo = getPokemonQualityInfo(Number(r.quality));
             const ivTotal = Number(r.ivTotal ?? 0);
             const qualityColor = qualityInfo?.color || '#a0aec0';
             const qualityLabel = qualityInfo ? `${qualityInfo.label} ×${Number(r.quality).toFixed(2)}` : `×${Number(r.quality).toFixed(2)}`;
             const shinyTag = r.shiny ? '<span style="color:#f6e05e;font-weight:800;">✨</span> ' : '';
+            const firstCatchTag = r.firstCatch
+                ? '<span title="Primeira captura desta espécie!" style="display:inline-block;margin-left:4px;padding:1px 5px;border-radius:4px;background:#6feb47;color:#fff;font-size:9px;font-weight:800;letter-spacing:.5px;vertical-align:middle;">🆕 1ª</span>'
+                : '';
             const iconUrl = getPokemonIconUrl(r.speciesId) || '';
             const iconHTML = iconUrl
                 ? `<img src="${escapeHTML(iconUrl)}" alt="" style="width:30px;height:30px;object-fit:contain;image-rendering:pixelated;" onerror="this.style.display='none'">`
@@ -297,7 +347,7 @@
             row.innerHTML = `
                 <span style="width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;">${iconHTML}</span>
                 <span style="min-width:0;">
-                    <b style="display:block;color:#fff;font-size:12px;">${shinyTag}${escapeHTML(r.name || '—')}</b>
+                    <b style="display:block;color:#fff;font-size:12px;">${shinyTag}${escapeHTML(r.name || '—')}${firstCatchTag}</b>
                     <small style="color:#a0aec0;font-size:10px;">${escapeHTML(fmtDate(r.at))} · ${escapeHTML(r.ballName || '—')}</small>
                 </span>
                 <span><b style="color:${qualityColor};font-weight:800;font-size:11px;">${escapeHTML(qualityLabel)}</b></span>
@@ -348,6 +398,17 @@
         bindInput(ivMinEl, 'ivMin');
         bindInput(ivMaxEl, 'ivMax');
         sortEl.addEventListener('change', () => { state.sort = sortEl.value; render(); });
+
+        // ===== Refresh em tempo real quando uma captura acontece =====
+        const onCaptureDetected = () => {
+            if (!document.body.contains(backdrop)) return;
+            // Pequeno debounce para agrupar várias mensagens seguidas.
+            clearTimeout(onCaptureDetected._timer);
+            onCaptureDetected._timer = setTimeout(() => {
+                if (!state.loading) load({ silent: true });
+            }, 400);
+        };
+        captureLogRefreshCallbacks.add(onCaptureDetected);
 
         // ===== Auto-refresh a cada 40s (só com a aba visível) =====
         function startAutoRefresh() {
