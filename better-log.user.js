@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PIW — Botão Log de Capturas na sidebar
 // @namespace    http://tampermonkey.net/
-// @version      1.4.0
-// @description  Adiciona o botão 📜 na sidebar do PIW-QOL que abre o Log de Capturas com filtros, ordenação, ícones e botão de limpar histórico. Auto-refresh a cada 40s quando a aba está visível. Exibe todos os resultados sem paginação.
+// @version      1.5.0
+// @description  Adiciona o botão 📜 na sidebar do PIW-QOL que abre o Log de Capturas com filtros persistentes, ordenação, ícones e botão de limpar histórico. Exibe 10 linhas com scroll, adapta-se ao viewport e auto-refresh a cada 40s quando a aba está visível.
 // @author       KizaniN
 // @match        https://poke.idleworld.online/play*
 // @grant        none
@@ -17,6 +17,8 @@
     'use strict';
 
     const AUTO_REFRESH_MS = 40000;
+    const VISIBLE_ROWS = 10;          // linhas visíveis antes do scroll
+    const ROW_HEIGHT_ESTIMATE = 46;   // altura aproximada de uma linha (px)
 
     // ===== Interceptação do WebSocket para detectar capturas em tempo real =====
     const NativeWebSocket = window.WebSocket;
@@ -144,6 +146,39 @@
             .script-capture-log-titlebar:active {
                 cursor: grabbing !important;
             }
+            /* Scrollbar discreta e estilizada */
+            .script-custom-capture-log .script-cl-list::-webkit-scrollbar {
+                width: 8px;
+            }
+            .script-custom-capture-log .script-cl-list::-webkit-scrollbar-track {
+                background: rgba(0,0,0,.18);
+                border-radius: 4px;
+            }
+            .script-custom-capture-log .script-cl-list::-webkit-scrollbar-thumb {
+                background: rgba(200,170,110,.42);
+                border-radius: 4px;
+            }
+            .script-custom-capture-log .script-cl-list::-webkit-scrollbar-thumb:hover {
+                background: rgba(200,170,110,.68);
+            }
+            .script-custom-capture-log .script-cl-list {
+                scrollbar-width: thin;
+                scrollbar-color: rgba(200,170,110,.42) rgba(0,0,0,.18);
+            }
+            /* Botão de limpar filtros */
+            .script-custom-capture-log .script-cl-reset-filters {
+                background: #0c161f;
+                color: #a0aec0;
+                border: 1px solid #273f52;
+                border-radius: 5px;
+                padding: 5px 7px;
+                font-size: 11px;
+                cursor: pointer;
+            }
+            .script-custom-capture-log .script-cl-reset-filters:hover {
+                color: #e2e8f0;
+                border-color: #3a5a70;
+            }
         `;
         (document.head || document.documentElement).appendChild(css);
     })();
@@ -183,21 +218,84 @@
         }
     }
 
+    // ===== Persistência de filtros =====
+    const FILTERS_STORAGE_KEY = 'script_capture_log_filters_v1';
+    const DEFAULT_FILTERS = {
+        tab: 'all',
+        search: '',
+        ivMin: '',
+        ivMax: '',
+        sort: 'recent'
+    };
+    function loadSavedFilters() {
+        try {
+            const raw = JSON.parse(localStorage.getItem(FILTERS_STORAGE_KEY) || 'null');
+            if (!raw || typeof raw !== 'object') return { ...DEFAULT_FILTERS };
+            return {
+                tab: ['all', 'shiny', 'normal'].includes(raw.tab) ? raw.tab : DEFAULT_FILTERS.tab,
+                search: typeof raw.search === 'string' ? raw.search : DEFAULT_FILTERS.search,
+                ivMin: raw.ivMin !== undefined && raw.ivMin !== null ? String(raw.ivMin) : DEFAULT_FILTERS.ivMin,
+                ivMax: raw.ivMax !== undefined && raw.ivMax !== null ? String(raw.ivMax) : DEFAULT_FILTERS.ivMax,
+                sort: ['recent','oldest','quality-desc','quality-asc','iv-desc','iv-asc','name'].includes(raw.sort)
+                    ? raw.sort : DEFAULT_FILTERS.sort
+            };
+        } catch {
+            return { ...DEFAULT_FILTERS };
+        }
+    }
+    function saveFilters(state) {
+        try {
+            localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify({
+                tab: state.tab,
+                search: state.search,
+                ivMin: state.ivMin,
+                ivMax: state.ivMax,
+                sort: state.sort
+            }));
+        } catch {}
+    }
+
+    // ===== Clamp de posição para manter a janela dentro do viewport =====
+    function clampModalPosition(left, top, width, height) {
+        const maxLeft = Math.max(0, window.innerWidth - width);
+        const maxTop = Math.max(0, window.innerHeight - height);
+        return {
+            left: Math.min(maxLeft, Math.max(0, left)),
+            top: Math.min(maxTop, Math.max(0, top))
+        };
+    }
+
     function showCustomCaptureLog() {
         document.querySelector('.script-capture-log-backdrop')?.remove();
         stopCaptureLogAutoRefresh();
 
+        // Estado inicial carregado do localStorage
+        const savedFilters = loadSavedFilters();
         const state = {
-            tab: 'all', sort: 'recent', search: '',
-            ivMin: '', ivMax: '',
-            allRows: [], loading: false
+            tab: savedFilters.tab,
+            sort: savedFilters.sort,
+            search: savedFilters.search,
+            ivMin: savedFilters.ivMin,
+            ivMax: savedFilters.ivMax,
+            allRows: [],
+            loading: false
         };
+
         const STORAGE_POS = 'script_capture_log_pos_v1';
         let savedPos = null;
         try { savedPos = JSON.parse(localStorage.getItem(STORAGE_POS) || 'null'); } catch {}
-        const initialStyle = savedPos && Number.isFinite(savedPos.left) && Number.isFinite(savedPos.top)
-            ? `position:fixed;left:${savedPos.left}px;top:${savedPos.top}px;`
-            : 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);';
+
+        // Largura e altura coerentes com o viewport (10 linhas + header + filtros + rodapé)
+        const modalWidth = Math.min(560, Math.max(320, window.innerWidth * 0.94));
+        const listMaxHeight = VISIBLE_ROWS * ROW_HEIGHT_ESTIMATE + (VISIBLE_ROWS - 1) * 5; // 5 = gap
+
+        let initialStyle;
+        if (savedPos && Number.isFinite(savedPos.left) && Number.isFinite(savedPos.top)) {
+            const clamped = clampModalPosition(savedPos.left, savedPos.top, modalWidth, 400);
+            initialStyle = `position:fixed;left:${clamped.left}px;top:${clamped.top}px;`;
+        } else {
+            initialStyle = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);';
+        }
 
         const backdrop = document.createElement('div');
         backdrop.className = 'script-capture-log-backdrop';
@@ -207,12 +305,12 @@
                 <div class="script-capture-log-titlebar" style="min-height:40px;box-sizing:border-box;padding:10px 12px 6px;border-bottom:1px solid rgba(200,170,110,.16);color:rgb(240,230,210);font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px;cursor:grab;user-select:none;">
                     <span>📜 Log de Capturas</span>
                     <span class="script-capture-log-totals" style="margin-left:8px;font-size:11px;color:#a0aec0;font-weight:400;"></span>
-                    <button class="script-capture-log-refresh mk-bulk-btn" type="button" style="margin-left:auto;font-size:11px;padding:2px 6px;cursor:pointer;">↻</button>
+                    <button class="script-capture-log-refresh mk-bulk-btn" type="button" title="Atualizar agora" style="margin-left:auto;font-size:11px;padding:2px 6px;cursor:pointer;">↻</button>
                     <button class="script-capture-log-close" type="button" aria-label="Fechar" style="background:none;border:0;color:#a0aec0;font-size:20px;cursor:pointer;margin-left:4px;padding:0 4px;">×</button>
                 </div>
                 <div style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;overflow:hidden;flex:1;min-height:0;">
                     <div style="display:flex;gap:5px;">
-                        <button class="mk-bulk-btn script-cl-tab on" data-tab="all" type="button">Todos</button>
+                        <button class="mk-bulk-btn script-cl-tab" data-tab="all" type="button">Todos</button>
                         <button class="mk-bulk-btn script-cl-tab" data-tab="shiny" type="button">✨ Shiny</button>
                         <button class="mk-bulk-btn script-cl-tab" data-tab="normal" type="button">Normais</button>
                     </div>
@@ -230,9 +328,13 @@
                             <option value="name">Nome (A–Z)</option>
                         </select>
                     </div>
-                    <div class="script-cl-status" style="color:#a0aec0;font-size:11px;padding:0 2px;">Carregando…</div>
-                    <div class="script-cl-list" style="flex:1;overflow:auto;display:grid;gap:5px;padding:1px;min-height:0;"></div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:0 2px;">
+                        <div class="script-cl-status" style="color:#a0aec0;font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Carregando…</div>
+                        <button class="script-cl-reset-filters" type="button" title="Limpar filtros salvos">↺ Limpar filtros</button>
+                    </div>
+                    <div class="script-cl-list" style="flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;display:grid;gap:5px;padding:1px;max-height:${listMaxHeight}px;"></div>
                     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding-top:4px;border-top:1px solid #1a2d3a;">
+                        <span class="script-cl-list-footer" style="font-size:10px;color:#718096;"></span>
                         <button class="script-cl-clear mk-bulk-btn" type="button" style="margin-left:auto;font-size:11px;padding:3px 10px;color:#feb2b2;border-color:#71313c;">🗑 Limpar histórico</button>
                     </div>
                 </div>
@@ -242,6 +344,7 @@
         const modal = backdrop.querySelector('.script-custom-capture-log');
         const titleBar = backdrop.querySelector('.script-capture-log-titlebar');
         const listEl = backdrop.querySelector('.script-cl-list');
+        const listFooterEl = backdrop.querySelector('.script-cl-list-footer');
         const statusEl = backdrop.querySelector('.script-cl-status');
         const totalsEl = backdrop.querySelector('.script-capture-log-totals');
         const searchEl = backdrop.querySelector('.script-cl-search');
@@ -249,17 +352,27 @@
         const ivMaxEl = backdrop.querySelector('.script-cl-iv-max');
         const sortEl = backdrop.querySelector('.script-cl-sort');
 
+        // ===== Restaurar valores dos campos a partir dos filtros salvos =====
+        searchEl.value = state.search;
+        ivMinEl.value = state.ivMin;
+        ivMaxEl.value = state.ivMax;
+        sortEl.value = state.sort;
+        backdrop.querySelectorAll('.script-cl-tab').forEach(t => {
+            t.classList.toggle('on', t.dataset.tab === state.tab);
+        });
+
         const close = () => {
             stopCaptureLogAutoRefresh();
             captureLogRefreshCallbacks.delete(onCaptureDetected);
             document.removeEventListener('pointermove', onPointerMove);
             document.removeEventListener('pointerup', onPointerUp);
             document.removeEventListener('visibilitychange', onVisibilityChange);
+            document.removeEventListener('resize', onWindowResize);
             backdrop.remove();
         };
         backdrop.querySelector('.script-capture-log-close').addEventListener('click', close);
 
-        // Arrastar pelo título
+        // ===== Arrastar pelo título =====
         let isDragging = false;
         let startX = 0, startY = 0, initialLeft = 0, initialTop = 0;
         function onPointerDown(e) {
@@ -278,10 +391,15 @@
         }
         function onPointerMove(e) {
             if (!isDragging) return;
-            const maxLeft = Math.max(0, window.innerWidth - modal.offsetWidth);
-            const maxTop = Math.max(0, window.innerHeight - modal.offsetHeight);
-            modal.style.setProperty('left', `${Math.min(maxLeft, Math.max(0, initialLeft + e.clientX - startX))}px`, 'important');
-            modal.style.setProperty('top', `${Math.min(maxTop, Math.max(0, initialTop + e.clientY - startY))}px`, 'important');
+            const rect = modal.getBoundingClientRect();
+            const next = clampModalPosition(
+                initialLeft + e.clientX - startX,
+                initialTop + e.clientY - startY,
+                rect.width,
+                rect.height
+            );
+            modal.style.setProperty('left', `${next.left}px`, 'important');
+            modal.style.setProperty('top', `${next.top}px`, 'important');
         }
         function onPointerUp() {
             if (isDragging) {
@@ -295,6 +413,20 @@
         titleBar.addEventListener('pointerdown', onPointerDown);
         document.addEventListener('pointermove', onPointerMove);
         document.addEventListener('pointerup', onPointerUp);
+
+        // ===== Re-clamp ao redimensionar a janela =====
+        function onWindowResize() {
+            if (!document.body.contains(backdrop)) return;
+            const rect = modal.getBoundingClientRect();
+            // Se estava centralizado (sem left/top), mantém centralizado
+            if (modal.style.transform && modal.style.transform.includes('translate')) {
+                return;
+            }
+            const clamped = clampModalPosition(rect.left, rect.top, rect.width, rect.height);
+            modal.style.setProperty('left', `${clamped.left}px`, 'important');
+            modal.style.setProperty('top', `${clamped.top}px`, 'important');
+        }
+        window.addEventListener('resize', onWindowResize);
 
         const fmtDate = iso => {
             const d = new Date(iso);
@@ -312,7 +444,7 @@
             if (state.ivMax !== '' && iv > Number(state.ivMax)) return false;
             return true;
         });
-               const compareByMode = (a, b) => {
+        const compareByMode = (a, b) => {
             switch (state.sort) {
                 case 'recent': return new Date(b.at) - new Date(a.at);
                 case 'oldest': return new Date(a.at) - new Date(b.at);
@@ -329,7 +461,7 @@
             const normals = rows.filter(r => !r.shiny).sort(compareByMode);
             return [...shinies, ...normals];
         };
-                const buildRow = r => {
+        const buildRow = r => {
             const qualityInfo = getPokemonQualityInfo(Number(r.quality));
             const ivTotal = Number(r.ivTotal ?? 0);
             const qualityColor = qualityInfo?.color || '#a0aec0';
@@ -343,11 +475,11 @@
                 ? `<img src="${escapeHTML(iconUrl)}" alt="" style="width:30px;height:30px;object-fit:contain;image-rendering:pixelated;" onerror="this.style.display='none'">`
                 : `<span style="display:inline-block;width:30px;height:30px;border-radius:50%;border:1px solid #1a1a1a;background:linear-gradient(to bottom,#e53e3e 0%,#e53e3e 46%,#1a1a1a 46%,#1a1a1a 54%,#f7fafc 54%,#f7fafc 100%);"></span>`;
             const row = document.createElement('div');
-            row.style.cssText = 'display:grid;grid-template-columns:34px minmax(120px,1.4fr) minmax(100px,1fr) minmax(70px,0.7fr) minmax(70px,0.7fr);gap:8px;align-items:center;background:#14222d;border:1px solid #1f3545;border-radius:7px;padding:6px 8px;color:#e2e8f0;font-size:12px;';
+            row.style.cssText = 'display:grid;grid-template-columns:34px minmax(120px,1.4fr) minmax(100px,1fr) minmax(70px,0.7fr) minmax(70px,0.7fr);gap:8px;align-items:center;background:#14222d;border:1px solid #1f3545;border-radius:7px;padding:6px 8px;color:#e2e8f0;font-size:12px;min-height:${ROW_HEIGHT_ESTIMATE - 10}px;box-sizing:border-box;';
             row.innerHTML = `
                 <span style="width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;">${iconHTML}</span>
                 <span style="min-width:0;">
-                    <b style="display:block;color:#fff;font-size:12px;">${shinyTag}${escapeHTML(r.name || '—')}${firstCatchTag}</b>
+                    <b style="display:block;color:#fff;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${shinyTag}${escapeHTML(r.name || '—')}${firstCatchTag}</b>
                     <small style="color:#a0aec0;font-size:10px;">${escapeHTML(fmtDate(r.at))} · ${escapeHTML(r.ballName || '—')}</small>
                 </span>
                 <span><b style="color:${qualityColor};font-weight:800;font-size:11px;">${escapeHTML(qualityLabel)}</b></span>
@@ -363,8 +495,15 @@
             listEl.innerHTML = '';
             if (filtered.length === 0) {
                 listEl.innerHTML = '<div style="color:#718096;text-align:center;padding:18px;">Nenhuma captura corresponde aos filtros.</div>';
+                listFooterEl.textContent = '';
             } else {
                 filtered.forEach(r => listEl.appendChild(buildRow(r)));
+                // Indicador de scroll
+                if (filtered.length > VISIBLE_ROWS) {
+                    listFooterEl.textContent = `Mostrando ${VISIBLE_ROWS} de ${filtered.length} · role para ver mais ↓`;
+                } else {
+                    listFooterEl.textContent = `${filtered.length} linha(s) exibida(s).`;
+                }
             }
         };
         const load = async ({ silent = false } = {}) => {
@@ -390,19 +529,45 @@
             tab.addEventListener('click', () => {
                 state.tab = tab.dataset.tab;
                 backdrop.querySelectorAll('.script-cl-tab').forEach(t => t.classList.toggle('on', t === tab));
+                saveFilters(state);
                 render();
             });
         });
-        const bindInput = (el, key) => el.addEventListener('input', () => { state[key] = el.value; render(); });
+        const bindInput = (el, key) => el.addEventListener('input', () => {
+            state[key] = el.value;
+            saveFilters(state);
+            render();
+        });
         bindInput(searchEl, 'search');
         bindInput(ivMinEl, 'ivMin');
         bindInput(ivMaxEl, 'ivMax');
-        sortEl.addEventListener('change', () => { state.sort = sortEl.value; render(); });
+        sortEl.addEventListener('change', () => {
+            state.sort = sortEl.value;
+            saveFilters(state);
+            render();
+        });
+
+        // ===== Limpar filtros =====
+        backdrop.querySelector('.script-cl-reset-filters').addEventListener('click', () => {
+            state.tab = DEFAULT_FILTERS.tab;
+            state.search = DEFAULT_FILTERS.search;
+            state.ivMin = DEFAULT_FILTERS.ivMin;
+            state.ivMax = DEFAULT_FILTERS.ivMax;
+            state.sort = DEFAULT_FILTERS.sort;
+            searchEl.value = '';
+            ivMinEl.value = '';
+            ivMaxEl.value = '';
+            sortEl.value = DEFAULT_FILTERS.sort;
+            backdrop.querySelectorAll('.script-cl-tab').forEach(t => {
+                t.classList.toggle('on', t.dataset.tab === DEFAULT_FILTERS.tab);
+            });
+            saveFilters(state);
+            render();
+        });
 
         // ===== Refresh em tempo real quando uma captura acontece =====
         const onCaptureDetected = () => {
             if (!document.body.contains(backdrop)) return;
-            // Pequeno debounce para agrupar várias mensagens seguidas.
             clearTimeout(onCaptureDetected._timer);
             onCaptureDetected._timer = setTimeout(() => {
                 if (!state.loading) load({ silent: true });
